@@ -28,6 +28,7 @@ def get_params(ntrain, EXP_NAME, order, Nside, architecture="FCN", verbose=True)
     nsides = [Nside, Nside//2, Nside//4, Nside//8, Nside//16, Nside//32, Nside//32]
     params['nsides'] = nsides
     params['indexes'] = utils.nside2indexes(nsides, order)
+    params['batch_norm_full'] = []
 
     if architecture == "CNN":
         # Replace the last graph convolution and global average pooling by a fully connected layer.
@@ -39,12 +40,28 @@ def get_params(ntrain, EXP_NAME, order, Nside, architecture="FCN", verbose=True)
         params['indexes'] = params['indexes'][:-1]
         params['statistics'] = None
         params['M'] = [n_classes]
-    elif architecture != "FCN":
+    elif architecture == 'FNN':
+        params['F'] = []
+        params['K'] = []
+        params['batch_norm'] = []
+        params['indexes'] = []
+        params['statistics'] = None
+        params['M'] = [128*order*order, 1024*order, 1024*order, n_classes]
+        params['batch_norm_full'] = [True]*3
+        params['input_shape'] = (Nside//order)**2
+
+    else:
         raise ValueError('Unknown architecture {}.'.format(architecture))
 
     # Regularization (to prevent over-fitting).
     params['regularization'] = 0  # Amount of L2 regularization over the weights (will be divided by the number of weights).
     params['dropout'] = 1  # Percentage of neurons to keep.
+
+    if architecture == 'FNN':
+        print('Use regularization new')
+        params['regularization'] = 10  # Amount of L2 regularization over the weights (will be divided by the number of weights).
+        params['dropout'] = 1  # Percentage of neurons to keep.
+    
 
     # Training.
     params['num_epochs'] = 80  # Number of passes through the training data.

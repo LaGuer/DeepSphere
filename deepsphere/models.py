@@ -405,11 +405,11 @@ class cgcnn(base_model):
         dir_name: Name for directories (summaries and model parameters).
     """
 
-    def __init__(self, L, F, K, p, batch_norm, M,
-                num_epochs, scheduler, optimizer,
+    def __init__(self, L, F, K, p, batch_norm, M, 
+                num_epochs, scheduler, optimizer, batch_norm_full=[],
                 conv='chebyshev5', pool='max', activation='relu', statistics=None,
                 regularization=0, dropout=1, batch_size=128, eval_frequency=200,
-                dir_name='', profile=False, debug=False):
+                dir_name='', profile=False, input_shape=None, debug=False):
         super(cgcnn, self).__init__()
 
         # Verify the consistency w.r.t. the number of layers.
@@ -426,7 +426,10 @@ class cgcnn(base_model):
                              'layer if no fully connected layer follows.')
 
         # Keep the useful Laplacians only. May be zero.
-        M_0 = L[0].shape[0]
+        if len(L):
+            M_0 = L[0].shape[0]
+        else:
+            M_0 = input_shape
         j = 0
         self.L = L
 
@@ -486,6 +489,7 @@ class cgcnn(base_model):
         self.regularization, self.dropout = regularization, dropout
         self.batch_size, self.eval_frequency = batch_size, eval_frequency
         self.batch_norm = batch_norm
+        self.batch_norm_full = batch_norm_full
         self.dir_name = dir_name
         self.filter = getattr(self, conv)
         self.pool = getattr(self, 'pool_' + pool)
@@ -689,7 +693,8 @@ class cgcnn(base_model):
                 x = self.activation(x)
                 dropout = tf.cond(training, lambda: float(self.dropout), lambda: 1.0)
                 x = tf.nn.dropout(x, dropout)
-
+                if self.batch_norm_full[i]:
+                    x = self.batch_normalization(x, training)
         # Logits linear layer, i.e. softmax without normalization.
         if len(self.M) != 0:
             with tf.variable_scope('logits'):

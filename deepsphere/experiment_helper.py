@@ -195,7 +195,7 @@ def data_preprossing(x_raw_train, labels_train, x_raw_test, sigma_noise, feature
         np.sum(labels_train == 0), np.sum(labels_train == 1)), flush=True)
     print('  Validation set: {} / {}'.format(
         np.sum(labels_validation == 0), np.sum(labels_validation == 1)), flush=True)
-    if feature_type:
+    if feature_type or augmentation:
         training = LabeledDatasetWithNoise(
             x_raw_train,
             labels_train,
@@ -261,10 +261,10 @@ def err_svc_linear_single(C, x_train, label_train, x_test, label_test):
     return error_train, error_test
 
 
-def err_svc_linear(x_train, labels_train, x_validation, labels_validation, nv=9):
+def err_svc_linear(x_train, labels_train, x_validation, labels_validation, nv=9, parallel = True):
     """Compute the error of a linear SVM classifer using cross-validation."""
     Cs = np.logspace(-2, 2, num=nv)
-    parallel = True
+    
     if parallel:
         num_workers = nv
         with mp.Pool(processes=num_workers) as pool:
