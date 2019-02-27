@@ -43,3 +43,5 @@ if __name__ == '__main__':
     for p in grid:
         launch_simulation('FCN', *p)
         launch_simulation('CNN', *p)
+        launch_simulation('FCN-big', *p)
+        launch_simulation('CNN-big', *p)
