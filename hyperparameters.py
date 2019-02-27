@@ -131,3 +131,5 @@ def get_params_CNN2D(ntrain, EXP_NAME, order, Nside, architecture='FCN', verbose
     params['save_dir'] = 'checkpoints/{}/'.format(EXP_NAME)
     params['summary_dir'] = 'summaries/{}'.format(EXP_NAME)
     params['print_every'] = 10
+    
+    return params
