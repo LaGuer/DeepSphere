@@ -41,6 +41,7 @@ def get_params(ntrain, EXP_NAME, order, Nside, architecture="FCN", verbose=True)
         params['statistics'] = None
         params['M'] = [n_classes]
     elif architecture == 'FNN':
+        # Fully connected neural network. This is not working!
         params['F'] = []
         params['K'] = []
         params['batch_norm'] = []
@@ -50,7 +51,7 @@ def get_params(ntrain, EXP_NAME, order, Nside, architecture="FCN", verbose=True)
         params['batch_norm_full'] = [True]*3
         params['input_shape'] = (Nside//order)**2
 
-    else:
+    elif architecture != "FCN":
         raise ValueError('Unknown architecture {}.'.format(architecture))
 
     # Regularization (to prevent over-fitting).
@@ -89,3 +90,44 @@ def get_params(ntrain, EXP_NAME, order, Nside, architecture="FCN", verbose=True)
         print('Learning rate will start at {:.1e} and finish at {:.1e}.'.format(*lr))
 
     return params
+
+
+def get_params_CNN2D(ntrain, EXP_NAME, order, Nside, architecture='FCN', verbose=True):
+    bn = True
+
+    params = dict()
+    params['net'] = dict()
+
+    if architecture == "CNN":
+        params['net']['full'] = [2]
+        params['net']['nfilter'] = [4, 8, 16, 16, 16]
+        params['net']['batch_norm'] = [bn, bn, bn, bn, bn]
+        params['net']['shape'] = [[5, 5], [5, 5], [5, 5], [5, 5], [5, 5]]
+        params['net']['stride'] = [2, 2, 2, 2, 2]
+        params['net']['statistics'] = None # 'mean', 'var', 'meanvar'
+    elif architecture == "FCN":
+        params['net']['full'] = []
+        params['net']['nfilter'] = [4, 8, 16, 16, 16, 2]
+        params['net']['batch_norm'] = [bn, bn, bn, bn, bn, bn]
+        params['net']['shape'] = [[5, 5], [5, 5], [5, 5], [5, 5], [5, 5], [3, 3]]
+        params['net']['stride'] = [2, 2, 2, 2, 2, 1]
+        params['net']['statistics'] = 'mean' # 'mean', 'var', 'meanvar'
+    else:
+        raise ValueError('Unknown architecture {}.'.format(architecture))
+    params['net']['summary'] = True
+    params['net']['in_shape'] = [1024//order, 1024//order] # Shape of the image
+    params['net']['out_shape'] = [2] # Shape of the output (number of class)
+    params['net']['l2_reg'] = 0 # l2 regularization
+    
+
+    # Training.
+    params['optimization'] = dict()
+    params['optimization']['epoch'] = 80  # Number of passes through the training data.
+    params['optimization']['batch_size'] = 16 * order**2  # Constant quantity of information (#pixels) per step (invariant to sample size).
+    params['optimization']['learning_rate'] = 1e-3
+
+    n_evaluations = 200
+    params['summary_every'] = int(params['optimization']['epoch'] * ntrain / params['optimization']['batch_size'] / n_evaluations)
+    params['save_dir'] = 'checkpoints/{}/'.format(EXP_NAME)
+    params['summary_dir'] = 'summaries/{}'.format(EXP_NAME)
+    params['print_every'] = 10

@@ -2,7 +2,20 @@ import tensorflow as tf
 import numpy as np
 import yaml
 from copy import deepcopy
+from deepsphere import utils
+import os, shutil, time, pickle
+import sklearn
 
+def build_index(level):
+    values1 = np.arange(4).reshape([2,2])
+    if level==1:
+        values = values1
+    else:
+        values = np.zeros([2**level,2**level])
+        lowerlevel = build_index(level-1)
+        values += np.tile(lowerlevel,[2,2])  
+        values += 4**(level-1)*np.repeat(np.repeat(values1,2**(level-1), axis=1), 2**(level-1), axis=0)
+    return values
 
 def _tf_variable(name, shape, initializer):
     """Create a tensorflow variable.
@@ -24,18 +37,14 @@ def lrelu(x, leak=0.2, name="lrelu"):
     """Leak relu."""
     return tf.maximum(x, leak * x, name=name)
 
-def batch_norm(x, epsilon=1e-5, momentum=0.9, name="batch_norm", train=True):
-    with tf.variable_scope(name):
-        bn = tf.contrib.layers.batch_norm(
-            x,
-            decay=momentum,
-            updates_collections=None,
-            epsilon=epsilon,
-            scale=True,
-            is_training=train,
-            scope=name)
-
-        return bn
+def batch_norm(x, train=True, epsilon=1e-5, momentum=0.8):
+    return tf.contrib.layers.batch_norm(x,
+                                        is_training=True,
+                                        decay=momentum,
+                                        epsilon=epsilon,
+                                        center=False,  # Done by bias.
+                                        scale=False,  # Done by filters.
+                                        )
 
 def conv2d(imgs, nf_out, shape=[5, 5], stride=2, scope="conv2d", summary=True):
     '''Convolutional layer for square images'''
@@ -67,7 +76,7 @@ def conv2d(imgs, nf_out, shape=[5, 5], stride=2, scope="conv2d", summary=True):
 def linear(input_, output_size, scope=None, summary=True):
     shape = input_.get_shape().as_list()
 
-    weights_initializer = select_initializer()
+    weights_initializer = tf.contrib.layers.xavier_initializer()
     const = tf.constant_initializer(0.0)
 
     with tf.variable_scope(scope or "Linear"):
@@ -81,7 +90,13 @@ def linear(input_, output_size, scope=None, summary=True):
             tf.summary.histogram("Bias_sum", bias, collections=["metrics"])
         return tf.matmul(input_, matrix) + bias
 
-
+def saferm(path):
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+        print('Erase recursively directory: ' + path)
+    if os.path.isfile(path):
+        os.remove(path)
+        print('Erase file: ' + path)
 
 def arg_helper(params, d_param):
     for key in d_param.keys():
@@ -103,17 +118,17 @@ class CNN(object):
     def default_params(self):
         bn = False
         d_params = dict()
-        d_params['full'] = [32]
+        d_params['full'] = [32, 2]
         d_params['nfilter'] = [16, 32, 32, 32]
         d_params['batch_norm'] = [bn, bn, bn, bn]
         d_params['shape'] = [[5, 5], [5, 5], [5, 5], [3, 3]]
         d_params['stride'] = [2, 2, 2, 1]
         d_params['summary'] = True
-        d_params['activation'] = lrelu # leaky relu
-        d_params['in_shape'] = [256, 256, 1] # Shape of the image
+        d_params['activation'] = tf.nn.relu #lrelu # leaky relu
+        d_params['in_shape'] = [256, 256] # Shape of the image
         d_params['out_shape'] = [2] # Shape of the output (number of class)
-        d_params['l2_reg'] = 0 # Shape of the output (number of class)
-        l2_reg
+        d_params['l2_reg'] = 0 # l2 regularization
+        d_params['statistics'] = None # 'mean', 'var', 'meanvar'
 
         return d_params
 
@@ -137,13 +152,16 @@ class CNN(object):
         in_shape = self._params['in_shape']
         out_shape = self._params['out_shape']
 
-        self.input = tf.placeholder(tf.float32, shape=[None, *shape], name='inputs')
+        self.input = tf.placeholder(tf.float32, shape=[None, *in_shape, 1], name='inputs')
         self.labels = tf.placeholder(tf.float32, shape=[None, *out_shape], name='labels')
+        is_training = tf.Variable(False, name='train_in', trainable=False)
+        self.is_training = tf.placeholder_with_default(is_training, (), 'training')
+        tf.summary.image('train/input', self.input, max_outputs=1, collections=["train"])
 
-        print('  * Input shape : {}'.format(self.out.shape))
+        print('  * Input shape : {}'.format(self.input.shape))
         self._logits = self.cnn(self.input , reuse=False)
-        self._outputs = tf.nn.sigmoid(self._logits)
-        self._cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(logits=self._logits, labels=self.labels)
+        self._outputs = tf.nn.softmax(self._logits)
+        self._cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=self._logits, labels=self.labels))
         print('  * Output shape : {}'.format(self._outputs.shape))
         
         if self._params['l2_reg']:
@@ -160,7 +178,7 @@ class CNN(object):
         tf.summary.scalar('train/loss_cross_entropy', self._cross_entropy, collections=["train"])
         tf.summary.scalar('train/loss', self._loss, collections=["train"])
 
-    def cnn(x, reuse='False', scope="cnn"):
+    def cnn(self, x, reuse=False, scope="cnn"):
         params = self.params
         assert(len(params['stride']) ==
                len(params['nfilter']) ==
@@ -179,13 +197,12 @@ class CNN(object):
                          nf_out=params['nfilter'][i],
                          shape=params['shape'][i],
                          stride=params['stride'][i],
-                         use_spectral_norm=params['spectral_norm'],
                          scope='{}_conv'.format(i),
                          summary=params['summary'])
                 rprint('     {} Conv layer with {} channels'.format(i, params['nfilter'][i]), reuse)
 
                 if params['batch_norm'][i]:
-                    x = batch_norm(x, name='{}_bn'.format(i), train=True)
+                    x = batch_norm(x, train=self.is_training)
                     rprint('         Batch norm', reuse)
                 rprint('         Size of the variables: {}'.format(x.shape), reuse)
 
@@ -207,7 +224,7 @@ class CNN(object):
                 else:
                     raise ValueError('Unknown statistical layer {}'.format(self.statistics))
 
-            x = tf.reshape(x, [bs, prod(x.shape.as_list()[1:])])
+            x = tf.reshape(x, [bs, np.prod(x.shape.as_list()[1:])])
             rprint('     Reshape to {}'.format(x.shape), reuse)
 
             for i in range(nfull-1):
@@ -219,18 +236,19 @@ class CNN(object):
 
                 rprint('     {} Full layer with {} outputs'.format(nconv+i, params['full'][i]), reuse)
                 rprint('         Size of the variables: {}'.format(x.shape), reuse)
-
-            x = linear(x, params['full'][-1] 'out', summary=params['summary'])
-            # x = tf.sigmoid(x)
-            rprint('     {} Full layer with {} outputs'.format(nconv+nfull, 1), reuse)
+            if len(params['full']):
+                x = linear(x, params['full'][-1], 'out', summary=params['summary'])
+                # x = tf.sigmoid(x)
+                rprint('     {} Full layer with {} outputs'.format(nconv+nfull, 1), reuse)
             rprint('     The output is of size {}'.format(x.shape), reuse)
             rprint(''.join(['-']*50)+'\n', reuse)
         return x
 
     def batch2dict(self, inputs):
         d = dict()
-        d['input'] = inputs[0]
-        d['labels'] = inputs[1]
+        sh = (inputs[0].shape[0], *self.params['in_shape'], 1)
+        d['input'] = inputs[0].reshape(sh)
+        d['labels'] =  np.eye(self.params['out_shape'][0])[inputs[1]]
         return d
 
     @property
@@ -281,21 +299,29 @@ class NNSystem(object):
             print('User parameters NNSystem...')
             print(yaml.dump(params))
 
-        self._params = deepcopy(utils.arg_helper(params, self.default_params()))
+        self._params = deepcopy(arg_helper(params, self.default_params()))
         if self._debug_mode:
             print('\nParameters used for the NNSystem..')
             print(yaml.dump(self._params))
         tf.reset_default_graph()
-        if name:
-            self._net = model(self.params['net'], name=name)
-        else:
-            self._net = model(self.params['net'])
-        self._params['net'] = deepcopy(self.net.params)
-        self._name = self._net.name
-        self._add_optimizer()
-        self._saver = tf.train.Saver(tf.global_variables(), max_to_keep=100)
+        self._graph = tf.Graph()
+        with self._graph.as_default():
+            if name:
+                self._net = model(self.params['net'], name=name)
+            else:
+                self._net = model(self.params['net'])
+            self._graph_init()
+            self._params['net'] = deepcopy(self.net.params)
+            self._name = self._net.name
+            self._add_optimizer()
+            self._saver = tf.train.Saver(tf.global_variables(), max_to_keep=100)
+            self._summaries = tf.summary.merge(tf.get_collection("train"))
+            self._opinit = tf.global_variables_initializer()
+        self._graph.finalize()
         utils.show_all_variables()
-        self._summaries = tf.summary.merge(tf.get_collection("train"))
+
+    def _graph_init(self):
+        pass
 
     def _add_optimizer(self):
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -334,16 +360,17 @@ class NNSystem(object):
 
         # Create the save diretory if it does not exist
         os.makedirs(self._params['save_dir'], exist_ok=True)
-        run_config = tf.ConfigProto()
 
-        with tf.Session(config=run_config) as self._sess:
+        with tf.Session(graph=self._graph) as self._sess:
             if resume:
                 print('Load weights in the network')
                 self.load()
             else:
-                self._sess.run(tf.global_variables_initializer())
-                utils.saferm(self.params['summary_dir'])
-                utils.saferm(self.params['save_dir'])
+#                 self._sess.run(tf.global_variables_initializer())
+                self._sess.run(self._opinit)
+                
+                saferm(self.params['summary_dir'])
+                saferm(self.params['save_dir'])
 
             self._summary_writer = tf.summary.FileWriter(
                 self._params['summary_dir'], self._sess.graph)
@@ -356,15 +383,15 @@ class NNSystem(object):
                 print('Start training')
                 while self._epoch < self._n_epoch:
                     epoch_loss = 0.
-                    for idx, batch in enumerate(
-                            dataset.iter(batch_size)):
-
+                    diter = dataset.iter(batch_size)
+                    for idx in range(dataset.N//batch_size):
+                        batch = next(diter)
                         if resume:
                             self._counter = self.params['curr_counter']
                             resume = False
                         else:
                             self._params['curr_counter'] = self._counter
-                        feed_dict = self._get_dict(**self._net.batch2dict(batch))
+                        feed_dict = self._get_dict(**self._net.batch2dict(batch), is_training=True)
                         curr_loss = self._run_optimization(feed_dict, idx)
                         # epoch_loss += curr_loss
 
@@ -472,23 +499,26 @@ class NNSystem(object):
         return False
 
 
-    def outputs(self, checkpoint=None, **kwargs):
-        outputs = self._net.outputs
-
-        with tf.Session() as self._sess:
+    def outputs(self, checkpoint=None, sess=None, is_training=False, **kwargs):
+        close = False
+        if sess is None:
+            self._sess = tf.Session(graph=self._graph)
+            close = True
 
             if self.load(checkpoint=checkpoint):
                 print("Model loaded.")
             else:
                 raise ValueError("Unable to load the model")
-
-            self._sess.run([tf.local_variables_initializer()])
-            feed_dict = self._get_dict(**kwargs)
-
-            return self._sess.run(outputs, feed_dict=feed_dict)
+#         else:
+#             self._sess.run(self._opinit)
+        feed_dict = self._get_dict(is_training=is_training, **kwargs)
+        ret = self._sess.run(self._net.outputs, feed_dict=feed_dict)
+        if close:
+            self._sess.close()
+        return ret
 
     def loss(self, dataset, checkpoint=None):
-        with tf.Session() as self._sess:
+        with tf.Session(graph=self._graph) as self._sess:
 
             if self.load(checkpoint=checkpoint):
                 print("Model loaded.")
@@ -497,7 +527,7 @@ class NNSystem(object):
             loss = 0
             batch_size = self._params['optimization']['batch_size']
             for idx, batch in enumerate(dataset.iter(batch_size)):
-                feed_dict = self._get_dict(**self.net.batch2dict(batch))
+                feed_dict = self._get_dict(**self.net.batch2dict(batch), is_training=False)
                 loss += self._sess.run(self.net.loss, feed_dict)
         return loss/idx
     @property
@@ -512,30 +542,92 @@ class NNSystem(object):
 class ValidationNNSystem(NNSystem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+    def _graph_init(self):
         self._validation_loss = tf.placeholder(tf.float32, name='validation_loss')
         self._validation_cross_entropy = tf.placeholder(tf.float32, name='validation_cross_entropy')
+        self._validation_accuracy = tf.placeholder(tf.float32, name='validation_accuracy')
+        self._validation_f1 = tf.placeholder(tf.float32, name='validation_f1')
         tf.summary.scalar("validation/loss", self._validation_loss, collections=["validation"])
         tf.summary.scalar('validation/loss_cross_entropy', self._validation_cross_entropy, collections=["validation"])
+        tf.summary.scalar('validation/accuracy', self._validation_accuracy, collections=["validation"])
+        tf.summary.scalar('validation/f1', self._validation_f1, collections=["validation"])
 
         self._summaries_validation = tf.summary.merge(tf.get_collection("validation"))
 
 
     def train(self, dataset_train, dataset_validation, resume=False):
+        batch_size = self._params['optimization']['batch_size']
         self._validation_dataset = dataset_validation
+        self._validation_dataset_iter = self._validation_dataset.iter(batch_size)
         super().train(dataset_train, resume=resume)
 
     def _train_log(self, feed_dict=dict()):
         super()._train_log(feed_dict)
         loss = 0
         batch_size = self._params['optimization']['batch_size']
-        for idx, batch in enumerate(
-            self._validation_dataset.iter(batch_size)):
+        labels = []
+        outputs = []
+        nel = np.int(np.ceil(self._validation_dataset.N/batch_size))
+        for idx in range(nel):
+            batch = next(self._validation_dataset_iter)
+            feed_dict2 = self._get_dict(**self._net.batch2dict(batch), is_training=False)
+            loss, cross_entropy, label, output = self._sess.run([self._net.loss, self._net._cross_entropy, self.net.labels, self.net.outputs], feed_dict2)
+            labels.append(label)
+            outputs.append(output)
+        loss = loss/nel
+        
+        labels = np.concatenate(labels)
+        outputs = np.concatenate(outputs)
 
-            feed_dict2 = self._get_dict(**self._net.batch2dict(batch))
-            loss, cross_entropy += self._sess.run([self._net.loss, self._net._cross_entropy], feed_dict2)
-        loss = loss/idx
+        predictions = np.argmax(outputs, axis=1)        
+        labels = np.argmax(labels, axis=1)
+        
+        ncorrects = np.sum(predictions == labels)
+        accuracy = 100 * sklearn.metrics.accuracy_score(labels, predictions)
+        f1 = 100 * sklearn.metrics.f1_score(labels, predictions, average='weighted')
+        string = 'accuracy: {:.2f} ({:d} / {:d}), f1 (weighted): {:.2f}'.format(
+                accuracy, ncorrects, len(labels), f1)
+        print(string)
+        
         print("Validation loss: {}".format(loss))
         print("Validation cross entropy: {}".format(cross_entropy))
         feed_dict[self._validation_loss] = loss
+        feed_dict[self._validation_cross_entropy] = cross_entropy
+        feed_dict[self._validation_accuracy] = accuracy
+        feed_dict[self._validation_f1] = f1
         summary = self._sess.run(self._summaries_validation, feed_dict=feed_dict)
         self._summary_writer.add_summary(summary, self._counter)
+        
+        
+class Healpix2CNN(object):
+    def __init__(self, **kwargs):
+        self.model = ValidationNNSystem(CNN, kwargs)
+    def fit(self, *args, **kwargs):
+        self.model.train(*args, **kwargs)
+    def outputs(self, features, checkpoint=None):
+        N = features.shape[0]
+        sh = (N, *self.model.net.params['in_shape'], 1)
+        feature_r = features.reshape(sh)
+        batch_size = self.model.params['optimization']['batch_size']
+        if N > batch_size:
+            with tf.Session(graph=self.model._graph) as sess:
+                if self.model.load(sess=sess, checkpoint=checkpoint):
+                    print("Model loaded.")
+                else:
+                    raise ValueError("Unable to load the model")
+
+                tmp = []
+                for i in range(N//batch_size):
+                    tmpdat = feature_r[i*batch_size:(i+1)*batch_size]
+                    tmp.append(self.model.outputs(sess=sess, input=tmpdat))
+                res = np.mod(N, batch_size)
+                if res:
+                    tmpdat = feature_r[-res:]
+                    tmp.append(self.model.outputs(sess=sess, input=tmpdat))
+                return np.concatenate(tmp)
+        else:
+            return self.model.outputs(checkpoint=checkpoint, input=feature_r)
+    def predict(self, *args, **kwargs):
+        outputs = self.outputs(*args, **kwargs)
+        return np.argmax(outputs, axis=1)  
