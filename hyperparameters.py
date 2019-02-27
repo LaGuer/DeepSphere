@@ -107,9 +107,9 @@ def get_params_CNN2D(ntrain, EXP_NAME, order, Nside, architecture='FCN', verbose
         params['net']['statistics'] = None # 'mean', 'var', 'meanvar'
     elif architecture == "FCN":
         params['net']['full'] = []
-        params['net']['nfilter'] = [4, 8, 16, 16, 16, 2]
+        params['net']['nfilter'] = [8, 16, 32, 32, 16, 2]
         params['net']['batch_norm'] = [bn, bn, bn, bn, bn, bn]
-        params['net']['shape'] = [[5, 5], [5, 5], [5, 5], [5, 5], [5, 5], [3, 3]]
+        params['net']['shape'] = [[5, 5], [5, 5], [5, 5], [5, 5], [5, 5], [5, 5]]
         params['net']['stride'] = [2, 2, 2, 2, 2, 1]
         params['net']['statistics'] = 'mean' # 'mean', 'var', 'meanvar'
     else:
