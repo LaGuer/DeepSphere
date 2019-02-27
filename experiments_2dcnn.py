@@ -42,7 +42,10 @@ def single_experiment(sigma, order, sigma_noise, experiment_type):
     
     features_train = features_train[:, index]
     features_validation = features_validation[:, index]
+    shuffle = np.random.permutation(len(features_test))
     features_test = features_test[:, index]
+    features_test = features_test[shuffle]
+    labels_test = labels_test[shuffle]
     
     training = LabeledDatasetWithNoise(features_train, labels_train, end_level=sigma_noise)
     validation = LabeledDataset(features_validation, labels_validation)
