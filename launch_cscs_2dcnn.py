@@ -15,6 +15,7 @@ txtfile = '''#!/bin/bash -l
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --constraint=gpu
+#SBATCH --account=sd01
 #SBATCH --output=2dcnn-{0}-{1}-{2}-{3}-%j.log
 #SBATCH --error=2dcnn-{0}-{1}-{2}-{3}-%j.log
 
