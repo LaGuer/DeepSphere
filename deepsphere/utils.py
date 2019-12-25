@@ -19,6 +19,16 @@ if sys.version_info[0] > 2:
 else:
     from urllib import urlretrieve
 
+def build_index(level):
+    values1 = np.arange(4).reshape([2,2])
+    if level==1:
+        values = values1
+    else:
+        values = np.zeros([2**level,2**level])
+        lowerlevel = build_index(level-1)
+        values += np.tile(lowerlevel,[2,2])  
+        values += 4**(level-1)*np.repeat(np.repeat(values1,2**(level-1), axis=1), 2**(level-1), axis=0)
+    return values
 
 def healpix_weightmatrix(nside=16, nest=True, indexes=None, dtype=np.float32):
     """Return an unnormalized weight matrix for a graph using the HEALPIX sampling.
@@ -181,9 +191,9 @@ def rescale_L(L, lmax=2, scale=1):
     """Rescale the Laplacian eigenvalues in [-scale,scale]."""
     M, M = L.shape
     I = sparse.identity(M, format='csr', dtype=L.dtype)
-    L /= (lmax / 2)
+    L *= 2 * scale / lmax
     L -= I
-    return L*scale
+    return L
 
 
 def build_laplacians(nsides, indexes=None, use_4=False):

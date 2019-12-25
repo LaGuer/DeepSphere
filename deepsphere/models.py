@@ -60,22 +60,23 @@ class LoadableGenerator(object):
 class base_model(object):
     """Common methods for all models."""
 
-    def __init__(self):
+    def __init__(self, loss='cross_entropy'):
         self.regularizers = []
         self.regularizers_size = []
+        self._loss_type = loss
 
     # High-level interface which runs the constructed computational graph.
 
     def predict(self, data, labels=None, sess=None):
         loss = 0
         size = data.shape[0]
-        predictions = np.empty(size)
+        predictions = []
         sess = self._get_session(sess)
         for begin in range(0, size, self.batch_size):
             end = begin + self.batch_size
             end = min([end, size])
 
-            batch_data = np.zeros((self.batch_size, data.shape[1]))
+            batch_data = np.zeros((self.batch_size, *data.shape[1:]))
             tmp_data = data[begin:end,:]
             if type(tmp_data) is not np.ndarray:
                 tmp_data = tmp_data.toarray()  # convert sparse matrices
@@ -84,7 +85,10 @@ class base_model(object):
 
             # Compute loss if labels are given.
             if labels is not None:
-                batch_labels = np.zeros(self.batch_size)
+                if self._loss_type =='cross_entropy':
+                    batch_labels = np.zeros(self.batch_size)
+                else:
+                    batch_labels = np.zeros((self.batch_size,labels.shape[1]))
                 batch_labels[:end-begin] = labels[begin:end]
                 feed_dict[self.ph_labels] = batch_labels
                 batch_pred, batch_loss = sess.run([self.op_prediction, self.op_loss], feed_dict)
@@ -92,7 +96,8 @@ class base_model(object):
             else:
                 batch_pred = sess.run(self.op_prediction, feed_dict)
 
-            predictions[begin:end] = batch_pred[:end-begin]
+            predictions.append(batch_pred[:end-begin])
+        predictions = np.concatenate(predictions)
 
         if labels is not None:
             return predictions, loss * self.batch_size / size
@@ -115,20 +120,24 @@ class base_model(object):
         """
         t_cpu, t_wall = process_time(), time.time()
         predictions, loss = self.predict(data, labels, sess)
-        ncorrects = sum(predictions == labels)
-        accuracy = 100 * sklearn.metrics.accuracy_score(labels, predictions)
-        f1 = 100 * sklearn.metrics.f1_score(labels, predictions, average='weighted')
-        string = 'accuracy: {:.2f} ({:d} / {:d}), f1 (weighted): {:.2f}, loss: {:.2e}'.format(
-                accuracy, ncorrects, len(labels), f1, loss)
+        if self._loss_type =='cross_entropy':
+            ncorrects = sum(predictions == labels)
+            accuracy = 100 * sklearn.metrics.accuracy_score(labels, predictions)
+            f1 = 100 * sklearn.metrics.f1_score(labels, predictions, average='weighted')
+            string = 'accuracy: {:.2f} ({:d} / {:d}), f1 (weighted): {:.2f}, loss: {:.2e}'.format(
+                    accuracy, ncorrects, len(labels), f1, loss)
+        else:
+            string = 'loss: {:.2e}'.format(loss)
+            accuracy, f1 = None, None
         if sess is None:
             string += '\nCPU time: {:.0f}s, wall time: {:.0f}s'.format(process_time()-t_cpu, time.time()-t_wall)
         return string, accuracy, f1, loss
 
     def fit(self, train_dataset, val_dataset, use_tf_dataset=False):
 
-        # Load the dataset
-        if use_tf_dataset:
-            self.loadable_generator.load(train_dataset.iter(self.batch_size))
+#         # Load the dataset
+#         if use_tf_dataset:
+#             self.loadable_generator.load(train_dataset.iter(self.batch_size))
 
         t_cpu, t_wall = process_time(), time.time()
         sess = tf.Session(graph=self.graph)
@@ -144,64 +153,71 @@ class base_model(object):
         sess.run(self.op_init)
 
         # Training.
-        accuracies_validation = []
+        if self._loss_type =='cross_entropy':
+            accuracies_validation = []
+        else:
+            accuracies_validation = None
         losses_validation = []
         losses_training = []
         num_steps = int(self.num_epochs * train_dataset.N / self.batch_size)
-        if not use_tf_dataset:
-            train_iter = train_dataset.iter(self.batch_size)
-        else:
-            sess.run(self.tf_data_iterator.initializer)
+#         if not use_tf_dataset:
+        train_iter = train_dataset.iter(self.batch_size)
+#         else:
+#             sess.run(self.tf_data_iterator.initializer)
 
         val_data, val_labels = val_dataset.get_all_data()
-        for step in range(1, num_steps+1):
+        try:
+            for step in range(1, num_steps+1):
 
-            if not use_tf_dataset:
+    #             if not use_tf_dataset:
                 batch_data, batch_labels = next(train_iter)
                 if type(batch_data) is not np.ndarray:
                     batch_data = batch_data.toarray()  # convert sparse matrices
                 feed_dict = {self.ph_data: batch_data, self.ph_labels: batch_labels, self.ph_training: True}
-            else:
-                feed_dict = {self.ph_training: True}
+    #             else:
+    #                 feed_dict = {self.ph_training: True}
 
-            learning_rate, loss = sess.run([self.op_train, self.op_loss], feed_dict)
+                learning_rate, loss = sess.run([self.op_train, self.op_loss], feed_dict)
 
-            evaluate = (step % self.eval_frequency == 0) or (step == num_steps)
-            if evaluate and self.profile:
-                run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                run_metadata = tf.RunMetadata()
-            else:
-                run_options = None
-                run_metadata = None
+                evaluate = (step % self.eval_frequency == 0) or (step == num_steps)
+                if evaluate and self.profile:
+                    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                    run_metadata = tf.RunMetadata()
+                else:
+                    run_options = None
+                    run_metadata = None
+                learning_rate, loss = sess.run([self.op_train, self.op_loss], feed_dict, run_options, run_metadata)
 
-            learning_rate, loss = sess.run([self.op_train, self.op_loss], feed_dict, run_options, run_metadata)
+                # Periodical evaluation of the model.
+                if evaluate:
+                    epoch = step * self.batch_size / train_dataset.N
+                    print('step {} / {} (epoch {:.2f} / {}):'.format(step, num_steps, epoch, self.num_epochs))
+                    print('  learning_rate = {:.2e}, training loss = {:.2e}'.format(learning_rate, loss))
+                    losses_training.append(loss)
+                    string, accuracy, f1, loss = self.evaluate(val_data, val_labels, sess)
+                    if self._loss_type =='cross_entropy':
+                        accuracies_validation.append(accuracy)
+                    losses_validation.append(loss)
+                    print('  validation {}'.format(string))
+                    print('  CPU time: {:.0f}s, wall time: {:.0f}s'.format(process_time()-t_cpu, time.time()-t_wall))
 
-            # Periodical evaluation of the model.
-            if evaluate:
-                epoch = step * self.batch_size / train_dataset.N
-                print('step {} / {} (epoch {:.2f} / {}):'.format(step, num_steps, epoch, self.num_epochs))
-                print('  learning_rate = {:.2e}, training loss = {:.2e}'.format(learning_rate, loss))
-                losses_training.append(loss)
-                string, accuracy, f1, loss = self.evaluate(val_data, val_labels, sess)
-                accuracies_validation.append(accuracy)
-                losses_validation.append(loss)
-                print('  validation {}'.format(string))
-                print('  CPU time: {:.0f}s, wall time: {:.0f}s'.format(process_time()-t_cpu, time.time()-t_wall))
+                    # Summaries for TensorBoard.
+                    summary = tf.Summary()
+                    summary.ParseFromString(sess.run(self.op_summary, feed_dict))
+                    if self._loss_type =='cross_entropy':
+                        summary.value.add(tag='validation/accuracy', simple_value=accuracy)
+                        summary.value.add(tag='validation/f1', simple_value=f1)
+                    summary.value.add(tag='validation/loss', simple_value=loss)
+                    writer.add_summary(summary, step)
+                    if self.profile:
+                        writer.add_run_metadata(run_metadata, 'step{}'.format(step))
 
-                # Summaries for TensorBoard.
-                summary = tf.Summary()
-                summary.ParseFromString(sess.run(self.op_summary, feed_dict))
-                summary.value.add(tag='validation/accuracy', simple_value=accuracy)
-                summary.value.add(tag='validation/f1', simple_value=f1)
-                summary.value.add(tag='validation/loss', simple_value=loss)
-                writer.add_summary(summary, step)
-                if self.profile:
-                    writer.add_run_metadata(run_metadata, 'step{}'.format(step))
-
-                # Save model parameters (for evaluation).
-                self.op_saver.save(sess, path, global_step=step)
-
-        print('validation accuracy: best = {:.2f}, mean = {:.2f}'.format(max(accuracies_validation), np.mean(accuracies_validation[-10:])))
+                    # Save model parameters (for evaluation).
+                    self.op_saver.save(sess, path, global_step=step)
+        except KeyboardInterrupt:
+            print('Optimization stoped by the user')
+        if self._loss_type =='cross_entropy':
+            print('validation accuracy: best = {:.2f}, mean = {:.2f}'.format(max(accuracies_validation), np.mean(accuracies_validation[-10:])))
         writer.close()
         sess.close()
 
@@ -225,16 +241,27 @@ class base_model(object):
         self.graph = tf.Graph()
         with self.graph.as_default():
 
-            # Make the dataset
-            self.tf_train_dataset = tf.data.Dataset().from_generator(self.loadable_generator.iter, output_types=(tf.float32, tf.int32))
-            self.tf_data_iterator = self.tf_train_dataset.prefetch(2).make_initializable_iterator()
-            ph_data, ph_labels = self.tf_data_iterator.get_next()
+#             # Make the dataset
+#             self.tf_train_dataset = tf.data.Dataset().from_generator(self.loadable_generator.iter, output_types=(tf.float32, tf.int32,))
+#             self.tf_data_iterator = self.tf_train_dataset.prefetch(2).make_initializable_iterator()
+#             ph_data, ph_labels = self.tf_data_iterator.get_next()
 
 
             # Inputs.
             with tf.name_scope('inputs'):
-                self.ph_data = tf.placeholder_with_default(ph_data, (self.batch_size, M_0), 'data')
-                self.ph_labels = tf.placeholder_with_default(ph_labels, (self.batch_size), 'labels')
+#                 if self.input_channel == 1:
+#                     self.ph_data = tf.placeholder_with_default(ph_data, (self.batch_size, M_0), 'data')
+#                 else:
+#                     self.ph_data = tf.placeholder_with_default(ph_data, (self.batch_size, M_0, self.input_channel), 'data')
+#                 self.ph_labels = tf.placeholder_with_default(ph_labels, (self.batch_size), 'labels')
+                if self.input_channel == 1:
+                    self.ph_data = tf.placeholder(tf.float32, (self.batch_size, M_0), 'data')
+                else:
+                    self.ph_data = tf.placeholder(tf.float32, (self.batch_size, M_0, self.input_channel), 'data')
+                if self._loss_type =='cross_entropy':
+                    self.ph_labels = tf.placeholder(tf.int32, (self.batch_size), 'labels')
+                else:
+                    self.ph_labels = tf.placeholder(tf.float32, (self.batch_size, None), 'labels')
                 self.ph_training = tf.placeholder(tf.bool, (), 'training')
 
             # Model.
@@ -272,30 +299,50 @@ class base_model(object):
 
     def probabilities(self, logits):
         """Return the probability of a sample to belong to each class."""
-        with tf.name_scope('probabilities'):
-            probabilities = tf.nn.softmax(logits)
-            return probabilities
+        if self._loss_type =='cross_entropy':
+            with tf.name_scope('probabilities'):
+                probabilities = tf.nn.softmax(logits)
+                return probabilities
+        else:
+            return None
 
     def prediction(self, logits):
         """Return the predicted classes."""
         with tf.name_scope('prediction'):
-            prediction = tf.argmax(logits, axis=1)
+            if self._loss_type =='cross_entropy':
+                prediction = tf.argmax(logits, axis=1)
+            else:
+                prediction = logits
             return prediction
 
     def loss(self, logits, labels, regularization):
         """Adds to the inference model the layers required to generate loss."""
         with tf.name_scope('loss'):
-            with tf.name_scope('cross_entropy'):
-                labels = tf.to_int64(labels)
-                cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels)
-                cross_entropy = tf.reduce_mean(cross_entropy)
+            if self._loss_type =='cross_entropy':
+                with tf.name_scope('cross_entropy'):
+                    labels = tf.to_int64(labels)
+                    fit_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels)
+                    fit_loss = tf.reduce_mean(fit_loss)
+                # Summaries for TensorBoard.
+                tf.summary.scalar('loss/cross_entropy', fit_loss)
+            elif self._loss_type =='l2':
+                with tf.name_scope('L2_loss'):
+                    fit_loss = tf.reduce_mean(tf.nn.l2_loss(logits-labels))
+                # Summaries for TensorBoard.
+                tf.summary.scalar('loss/l2', fit_loss)
+            elif self._loss_type =='l1':
+                with tf.name_scope('L1_Loss'):
+                    fit_loss = tf.reduce_mean(tf.abs(logits-labels))
+                # Summaries for TensorBoard.
+                tf.summary.scalar('loss/l1', fit_loss)     
+            else:
+                raise ValueError('Unknown loss')
             with tf.name_scope('regularization'):
                 n_weights = np.sum(self.regularizers_size)
                 regularization *= tf.add_n(self.regularizers) / n_weights
-            loss = cross_entropy + regularization
+            loss = fit_loss + regularization
 
-            # Summaries for TensorBoard.
-            tf.summary.scalar('loss/cross_entropy', cross_entropy)
+
             tf.summary.scalar('loss/regularization', regularization)
             tf.summary.scalar('loss/total', loss)
             return loss
@@ -371,11 +418,13 @@ class cgcnn(base_model):
            Beware to have coarsened enough.
         batch_norm: apply batch normalization after filtering (boolean vector)
         L: List of Graph Laplacians. Size M x M.
+        input_channel: Number of channels of the input image (default 1)
 
     The following are hyper-parameters of fully connected layers.
     They are lists, which length is equal to the number of fc layers.
         M: Number of features per sample, i.e. number of hidden neurons.
-           The last layer is the softmax, i.e. M[-1] is the number of classes.
+           The last layer is the softmax, i.e. M[-1] is the number of classes for classification.
+           Their is no non-linearity for regression...
 
     The following are choices of implementation for various blocks.
         conv: graph convolutional layer, e.g. chebyshev5 or monomials.
@@ -387,6 +436,10 @@ class cgcnn(base_model):
             * 'var': compute the variance of each feature map
             * 'meanvar': compute the mean and variance of each feature map
             * 'histogram': compute a learned histogram of each feature map
+        loss: loss used to optimize the network
+            * 'cross_entropy': loss for classification
+            * 'l2': l2 loss 
+            * 'l1': l1 loss
 
     Training parameters:
         num_epochs:     Number of training epochs.
@@ -407,10 +460,11 @@ class cgcnn(base_model):
 
     def __init__(self, L, F, K, p, batch_norm, M,
                 num_epochs, scheduler, optimizer,
+                input_channel=1,
                 conv='chebyshev5', pool='max', activation='relu', statistics=None,
                 regularization=0, dropout=1, batch_size=128, eval_frequency=200,
-                dir_name='', profile=False, debug=False):
-        super(cgcnn, self).__init__()
+                dir_name='', profile=False, debug=False, loss='cross_entropy'):
+        super(cgcnn, self).__init__(loss=loss)
 
         # Verify the consistency w.r.t. the number of layers.
         if not len(L) == len(F) == len(K) == len(p) == len(batch_norm):
@@ -440,7 +494,7 @@ class cgcnn(base_model):
             print('  layer {0}: cgconv{0}'.format(i+1))
             print('    representation: M_{0} * F_{1} / p_{1} = {2} * {3} / {4} = {5}'.format(
                     i, i+1, L[i].shape[0], F[i], p[i], L[i].shape[0]*F[i]//p[i]))
-            F_last = F[i-1] if i > 0 else 1
+            F_last = F[i-1] if i > 0 else input_channel
             print('    weights: F_{0} * F_{1} * K_{1} = {2} * {3} * {4} = {5}'.format(
                     i, i+1, F_last, F[i], K[i], F_last*F[i]*K[i]))
             if not (i == Ngconv-1 and len(M) == 0):  # No bias if it's a softmax.
@@ -470,7 +524,7 @@ class cgcnn(base_model):
                 print('    biases: {} * {} = {}'.format(nbins, F[-1], M_last))
 
         for i in range(Nfc):
-            name = 'logits (softmax)' if i == Nfc-1 else 'fc{}'.format(i+1)
+            name = 'logits (softmax)' if (i == Nfc-1 and self._loss_type =='cross_entropy')else 'fc{}'.format(i+1)
             print('  layer {}: {}'.format(Ngconv+i+1, name))
             print('    representation: M_{} = {}'.format(Ngconv+i+1, M[i]))
             print('    weights: M_{} * M_{} = {} * {} = {}'.format(
@@ -481,6 +535,7 @@ class cgcnn(base_model):
 
         # Store attributes and bind operations.
         self.L, self.F, self.K, self.p, self.M = L, F, K, p, M
+        self.input_channel = input_channel
         self.num_epochs = num_epochs
         self.scheduler, self.optimizer = scheduler, optimizer
         self.regularization, self.dropout = regularization, dropout
@@ -649,7 +704,8 @@ class cgcnn(base_model):
     def _inference(self, x, training):
 
         # Graph convolutional layers.
-        x = tf.expand_dims(x, 2)  # N x M x F=1
+        if len(x.shape)<3:
+            x = tf.expand_dims(x, 2)  # N x M x F=1
         for i in range(len(self.p)):
             with tf.variable_scope('conv{}'.format(i+1)):
                 with tf.name_scope('filter'):
@@ -741,6 +797,368 @@ class cgcnn(base_model):
         ax.set_title(title.format(layer))
         return ax
 
+
+class cnn2d(base_model):
+    """
+    2D convolutional neural network (2D ConvNet)
+
+    The following are hyper-parameters of graph convolutional layers.
+    They are lists, which length is equal to the number of gconv layers.
+        F: Number of filters.
+        K: List of filter shape
+        p: Stride for each convolution.
+        batch_norm: apply batch normalization after filtering (boolean vector)
+        input_shape: Size of the input image 
+        input_channel: Number of channel of the input image
+
+    The following are hyper-parameters of fully connected layers.
+    They are lists, which length is equal to the number of fc layers.
+        M: Number of features per sample, i.e. number of hidden neurons.
+           The last layer is the softmax, i.e. M[-1] is the number of classes.
+
+    The following are choices of implementation for various blocks.
+        conv: graph convolutional layer, e.g. chebyshev5 or monomials.
+        pool: pooling, e.g. max or average.
+        activation: non-linearity, e.g. relu, elu, leaky_relu.
+        statistics: layer which computes statistics from feature maps for the network to be invariant to translation and rotation.
+            * None: no statistical layer (default)
+            * 'mean': compute the mean of each feature map
+            * 'var': compute the variance of each feature map
+            * 'meanvar': compute the mean and variance of each feature map
+            * 'histogram': compute a learned histogram of each feature map
+
+    Training parameters:
+        num_epochs:     Number of training epochs.
+        scheduler:      Learning rate scheduler: function that takes the current step and returns the learning rate.
+        optimizer:      Function that takes the learning rate and returns a TF optimizer.
+        batch_size:     Batch size. Must divide evenly into the dataset sizes.
+        eval_frequency: Number of steps between evaluations.
+        profile:        Whether to profile compute time and memory usage. Needs libcupti in LD_LIBRARY_PATH.
+        debug:          Whether the model should be debugged via Tensorboard.
+
+    Regularization parameters:
+        regularization: L2 regularizations of weights and biases.
+        dropout:        Dropout (fc layers): probability to keep hidden neurons. No dropout with 1.
+
+    Directories:
+        dir_name: Name for directories (summaries and model parameters).
+    """
+
+    def __init__(self, F, K, p, batch_norm, M, 
+                num_epochs, scheduler, optimizer,
+                input_channel=1,
+                pool='max', activation='relu', statistics=None,
+                regularization=0, dropout=1, batch_size=128, eval_frequency=200,
+                dir_name='', profile=False, input_shape=None, debug=False):
+        super(cnn2d, self).__init__()
+
+        # Verify the consistency w.r.t. the number of layers.
+        if not len(F) == len(K) == len(p) == len(batch_norm):
+            raise ValueError('Wrong specification of the convolutional layers: '
+                             'parameters L, F, K, p, batch_norm, must have the same length.')
+        if not np.all(np.array(p) >= 1):
+            raise ValueError('Down-sampling factors p should be greater or equal to one.')
+        p_log2 = np.where(np.array(p) > 1, np.log2(p), 0)
+        if not np.all(np.mod(p_log2, 1) == 0):
+            raise ValueError('Down-sampling factors p should be powers of two.')
+        if len(M) == 0 and p[-1] != 1:
+            raise ValueError('Down-sampling should not be used in the last '
+                             'layer if no fully connected layer follows.')
+        j = 0
+
+        # Print information about NN architecture.
+        Ngconv = len(p)
+        Nfc = len(M)
+        print('NN architecture')
+        print('  input: = {}'.format(input_shape))
+        nx, ny = input_shape
+        for i in range(Ngconv):
+            nx = nx//p[i]
+            ny = ny//p[i]
+            print('  layer {0}: 2dconv{0}'.format(i+1))
+            print('    representation: {0} x {1} x {2} = {3}'.format(nx, ny, F[i], nx*ny*F[i]))
+            F_last = F[i-1] if i > 0 else input_channel
+            print('    weights: {0} * {1} * {2} * {3} = {4}'.format(
+                    K[i][0], K[i][1], F_last, F[i],  F_last*F[i]*K[i][0]*K[i][1]))
+            if not (i == Ngconv-1 and len(M) == 0):  # No bias if it's a softmax.
+                print('    biases: F_{} = {}'.format(i+1, F[i]))
+            if batch_norm[i]:
+                print('    batch normalization')
+
+
+        M_last = nx*ny * F[-1]
+
+        if statistics is not None:
+            print('  Statistical layer: {}'.format(statistics))
+            if statistics is 'mean':
+                M_last = F[-1]
+                print('    representation: 1 * {} = {}'.format(F[-1], M_last))
+            elif statistics is 'var':
+                M_last = F[-1]
+                print('    representation: 1 * {} = {}'.format(F[-1], M_last))
+            elif statistics is 'meanvar':
+                M_last = 2 * F[-1]
+                print('    representation: 2 * {} = {}'.format(F[-1], M_last))
+            elif statistics is 'histogram':
+                nbins = 20
+                M_last = nbins * F[-1]
+                print('    representation: {} * {} = {}'.format(nbins, F[-1], M_last))
+                print('    weights: {} * {} = {}'.format(nbins, F[-1], M_last))
+                print('    biases: {} * {} = {}'.format(nbins, F[-1], M_last))
+
+        for i in range(Nfc):
+            name = 'logits (softmax)' if i == Nfc-1 else 'fc{}'.format(i+1)
+            print('  layer {}: {}'.format(Ngconv+i+1, name))
+            print('    representation: M_{} = {}'.format(Ngconv+i+1, M[i]))
+            print('    weights: M_{} * M_{} = {} * {} = {}'.format(
+                    Ngconv+i, Ngconv+i+1, M_last, M[i], M_last*M[i]))
+            if i < Nfc - 1:  # No bias if it's a softmax.
+                print('    biases: M_{} = {}'.format(Ngconv+i+1, M[i]))
+            M_last = M[i]
+
+        # Store attributes and bind operations.
+        self.F, self.K, self.p, self.M = F, K, p, M
+        self.num_epochs = num_epochs
+        self.scheduler, self.optimizer = scheduler, optimizer
+        self.regularization, self.dropout = regularization, dropout
+        self.batch_size, self.eval_frequency = batch_size, eval_frequency
+        self.batch_norm = batch_norm
+#         self.batch_norm_full = batch_norm_full
+        self.dir_name = dir_name
+        self.input_shape = input_shape
+        self.input_channel = input_channel
+        self.pool = getattr(self, 'pool_' + pool)
+        self.activation = getattr(tf.nn, activation)
+        self.statistics = statistics
+        self.profile, self.debug = profile, debug
+
+        # Build the computational graph.
+        self.build_graph()
+
+        
+    def predict(self, data, labels=None, sess=None):
+        loss = 0
+        size = data.shape[0]
+        predictions = np.empty(size)
+        sess = self._get_session(sess)
+        for begin in range(0, size, self.batch_size):
+            end = begin + self.batch_size
+            end = min([end, size])
+
+            batch_data = np.zeros((self.batch_size, *data.shape[1:]))
+            tmp_data = data[begin:end,:]
+            if type(tmp_data) is not np.ndarray:
+                tmp_data = tmp_data.toarray()  # convert sparse matrices
+            batch_data[:end-begin] = tmp_data
+            feed_dict = {self.ph_data: batch_data, self.ph_training: False}
+
+            # Compute loss if labels are given.
+            if labels is not None:
+                batch_labels = np.zeros(self.batch_size)
+                batch_labels[:end-begin] = labels[begin:end]
+                feed_dict[self.ph_labels] = batch_labels
+                batch_pred, batch_loss = sess.run([self.op_prediction, self.op_loss], feed_dict)
+                loss += batch_loss
+            else:
+                batch_pred = sess.run(self.op_prediction, feed_dict)
+
+            predictions[begin:end] = batch_pred[:end-begin]
+
+        if labels is not None:
+            return predictions, loss * self.batch_size / size
+        else:
+            return predictions
+        
+    def build_graph(self):
+        """Build the computational graph of the model."""
+
+        self.loadable_generator = LoadableGenerator()
+
+        self.graph = tf.Graph()
+        with self.graph.as_default():
+
+            # Make the dataset
+            self.tf_train_dataset = tf.data.Dataset().from_generator(self.loadable_generator.iter, output_types=(tf.float32, tf.int32))
+            self.tf_data_iterator = self.tf_train_dataset.prefetch(2).make_initializable_iterator()
+            ph_data, ph_labels = self.tf_data_iterator.get_next()
+
+
+            # Inputs.
+            with tf.name_scope('inputs'):
+                if self.input_channel>1:
+                    self.ph_data = tf.placeholder_with_default(ph_data, (self.batch_size, *self.input_shape), 'data')
+                else:
+                    self.ph_data = tf.placeholder_with_default(ph_data, (self.batch_size, *self.input_shape, self.input_channel), 'data')
+                self.ph_labels = tf.placeholder_with_default(ph_labels, (self.batch_size), 'labels')
+                self.ph_training = tf.placeholder(tf.bool, (), 'training')
+
+            # Model.
+            op_logits = self.inference(self.ph_data, self.ph_training)
+            self.op_loss = self.loss(op_logits, self.ph_labels, self.regularization)
+            self.op_train = self.training(self.op_loss)
+            self.op_prediction = self.prediction(op_logits)
+
+            # Initialize variables, i.e. weights and biases.
+            self.op_init = tf.global_variables_initializer()
+
+            # Summaries for TensorBoard and Save for model parameters.
+            self.op_summary = tf.summary.merge_all()
+            self.op_saver = tf.train.Saver(max_to_keep=5)
+            utils.show_all_variables()
+        self.graph.finalize()
+                  
+    def conv2d(self, imgs, nf_out, shape=[5, 5], stride=2, scope="conv2d", regularization=True):
+        '''Convolutional layer for square images'''
+
+        if not(isinstance(stride ,list) or isinstance(stride ,tuple)):
+            stride = [stride, stride]
+
+        weights_initializer = tf.contrib.layers.xavier_initializer()
+#         const = tf.constant_initializer(0.0)
+
+        with tf.variable_scope(scope):
+            sh = [shape[0], shape[1], imgs.get_shape()[-1].value, nf_out]
+            w = tf.get_variable('w', sh, initializer=weights_initializer)
+            if regularization:
+                self.regularizers.append(tf.nn.l2_loss(w)*np.prod(sh[:-1]))
+                self.regularizers_size.append(np.prod(sh))
+            conv = tf.nn.conv2d(
+                imgs, w, strides=[1, *stride, 1], padding='SAME')
+
+#             biases = _tf_variable('biases', [nf_out], initializer=const)
+#             conv = tf.nn.bias_add(conv, biases)
+
+
+            return conv
+
+    def bias(self, x):
+        """Add one bias per filter."""
+        const = tf.constant_initializer(0.0)
+        biases = tf.get_variable('biases', [x.shape[-1]], initializer=const)
+        return tf.nn.bias_add(x, biases)
+
+    def pool_max(self, x, p):
+        """Max pooling of size p. Should be a power of 2."""
+        if p > 1:
+            x = tf.expand_dims(x, 3)  # N x M x F x 1
+            x = tf.nn.max_pool(x, ksize=[1,p,1,1], strides=[1,p,1,1], padding='SAME')
+            return tf.squeeze(x, [3])  # N x M/p x F
+        else:
+            return x
+
+    def pool_average(self, x, p):
+        """Average pooling of size p. Should be a power of 2."""
+        if p > 1:
+            x = tf.expand_dims(x, 3)  # N x M x F x 1
+            x = tf.nn.avg_pool(x, ksize=[1,p,1,1], strides=[1,p,1,1], padding='SAME')
+            return tf.squeeze(x, [3])  # N x M/p x F
+        else:
+            return x
+
+    def learned_histogram(self, x, bins=20, initial_range=2):
+        """A learned histogram layer.
+
+        The center and width of each bin is optimized.
+        One histogram is learned per feature map.
+        """
+        # Shape of x: #samples x #nodes x #features.
+        n_features = int(x.get_shape()[2])
+        centers = tf.linspace(-float(initial_range), initial_range, bins, name='range')
+        centers = tf.expand_dims(centers, axis=1)
+        centers = tf.tile(centers, [1, n_features])  # One histogram per feature channel.
+        centers = tf.Variable(
+            tf.reshape(tf.transpose(centers), shape=[1, 1, n_features, bins]),
+            name='centers',
+            dtype=tf.float32)
+        width = 4 * initial_range / bins  # 50% overlap between bins.
+        widths = tf.get_variable(
+            name='widths',
+            shape=[1, 1, n_features, bins],
+            dtype=tf.float32,
+            initializer=tf.initializers.constant(value=width, dtype=tf.float32))
+        x = tf.expand_dims(x, axis=3)
+        # All are rank-4 tensors: samples, nodes, features, bins.
+        widths = tf.abs(widths)
+        dist = tf.abs(x - centers)
+        hist = tf.reduce_mean(tf.nn.relu(1 - dist * widths), axis=1) * (bins/initial_range/4)
+        return hist
+
+    def batch_normalization(self, x, training, momentum=0.9):
+        """Batch norm layer."""
+        # Normalize over all but the last dimension, that is the features.
+        return tf.layers.batch_normalization(x,
+                                             axis=-1,
+                                             momentum=momentum,
+                                             epsilon=1e-5,
+                                             center=False,  # Done by bias.
+                                             scale=False,  # Done by filters.
+                                             training=training)
+
+    def fc(self, x, Mout, bias=True):
+        """Fully connected layer with Mout features."""
+        N, Min = x.get_shape()
+        W = self._weight_variable_fc(int(Min), Mout, regularization=True)
+        y = tf.matmul(x, W)
+        if bias:
+            y += self._bias_variable([Mout], regularization=False)
+        return y
+
+    def _weight_variable_fc(self, Min, Mout, regularization=True):
+        """Xavier like weight initializer for fully connected layer."""
+        stddev = 1 / np.sqrt(Min)
+        return self._weight_variable([Min, Mout], stddev=stddev, regularization=regularization)
+
+    def _inference(self, x, training):
+        x = tf.expand_dims(x,3)
+        # Graph convolutional layers.
+        for i in range(len(self.p)):
+            with tf.variable_scope('conv{}'.format(i+1)):
+                with tf.name_scope('filter'):
+                    x = self.conv2d(x, self.F[i], self.K[i], self.p[i])
+                if i == len(self.p)-1 and len(self.M) == 0:
+                    break  # That is a linear layer before the softmax.
+                if self.batch_norm[i]:
+                    x = self.batch_normalization(x, training)
+                x = self.bias(x)
+                x = self.activation(x)
+#                 with tf.name_scope('pooling'):
+#                     x = self.pool(x, self.p[i])
+
+        # Statistical layer (provides invariance to translation and rotation).
+        with tf.variable_scope('stat'):
+            n_samples, nx,ny, n_features = x.get_shape()
+            n_nodes = nx*ny
+            x = tf.reshape(x, (n_samples, n_nodes, n_features))
+            if self.statistics is None:
+                x = tf.reshape(x, [int(n_samples), int(n_nodes * n_features)])
+            elif self.statistics is 'mean':
+                x, _ = tf.nn.moments(x, axes=1)
+            elif self.statistics is 'var':
+                _, x = tf.nn.moments(x, axes=1)
+            elif self.statistics is 'meanvar':
+                mean, var = tf.nn.moments(x, axes=1)
+                x = tf.concat([mean, var], axis=1)
+            elif self.statistics is 'histogram':
+                n_bins = 20
+                x = self.learned_histogram(x, n_bins)
+                x = tf.reshape(x, [int(n_samples), n_bins * int(n_features)])
+            else:
+                raise ValueError('Unknown statistical layer {}'.format(self.statistics))
+
+        # Fully connected hidden layers.
+        for i, M in enumerate(self.M[:-1]):
+            with tf.variable_scope('fc{}'.format(i+1)):
+                x = self.fc(x, M)
+                x = self.activation(x)
+                dropout = tf.cond(training, lambda: float(self.dropout), lambda: 1.0)
+                x = tf.nn.dropout(x, dropout)
+#                 if self.batch_norm_full[i]:
+#                     x = self.batch_normalization(x, training)
+        # Logits linear layer, i.e. softmax without normalization.
+        if len(self.M) != 0:
+            with tf.variable_scope('logits'):
+                x = self.fc(x, self.M[-1], bias=False)
+        return x
 
 class deepsphere(cgcnn):
     """
