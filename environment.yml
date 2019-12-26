@@ -2,7 +2,6 @@ dependencies:
   - matplotlib
   - numpy
   - scipy
-  - sklearn
   - healpy
   - scikit-learn
   - astropy
