@@ -6,7 +6,7 @@ dependencies:
   - scikit-learn
   - astropy
   - tqdm
-  - git+https://github.com/epfl-lts2/pygsp.git@ac7c5ec59d24eadf07c838b83334b816ac5bf040#egg=PyGSP
+#  - git+https://github.com/epfl-lts2/pygsp.git@ac7c5ec59d24eadf07c838b83334b816ac5bf040#egg=PyGSP
   - pandas
   - pip
   - pytest
